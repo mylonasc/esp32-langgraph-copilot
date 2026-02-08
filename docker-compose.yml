@@ -1,0 +1,22 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: esp-agent-backend
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      ESP_MCP_SERVERS_JSON: ${ESP_MCP_SERVERS_JSON:-[]}
+
+  ui:
+    build:
+      context: ./ui
+    container_name: esp-agent-ui
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
