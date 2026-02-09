@@ -6,20 +6,24 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:e2e": "NODE_PATH=./node_modules playwright test -c playwright.config.ts",
+    "test:e2e:headed": "NODE_PATH=./node_modules playwright test -c playwright.config.ts --headed"
   },
   "dependencies": {
     "@copilotkit/react-core": "^1.51.3",
     "@copilotkit/react-ui": "^1.51.3",
-    "next": "14.2.5",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
+    "@copilotkit/runtime-client-gql": "^1.51.3",
+    "next": "^16.1.6",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0",
+    "@playwright/test": "^1.52.0",
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3",
     "typescript": "^5.5.3"
   }
 }

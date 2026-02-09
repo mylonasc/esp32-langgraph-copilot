@@ -9,6 +9,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       ESP_MCP_SERVERS_JSON: ${ESP_MCP_SERVERS_JSON:-[]}
+      AGENT_FAKE_MODE: ${AGENT_FAKE_MODE:-false}
 
   ui:
     build:

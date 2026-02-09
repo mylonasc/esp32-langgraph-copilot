@@ -41,10 +41,23 @@ Endpoints:
 - `GET /status` (startup warnings + OpenAI config state)
 - `GET /servers`
 - `POST /servers`
+- `PUT /servers/{server_name}`
 - `DELETE /servers/{server_name}`
+- `POST /servers/test`
+- `GET /discovery/network`
+- `POST /discovery/scan`
 - `POST /agent/invoke`
 - `POST /agent/stream` (SSE token stream)
 - `POST /copilotkit` (OpenAI-style response shape for CopilotKit runtime URL, including streaming when `stream: true`)
+
+Backend environment variables:
+
+- `OPENAI_API_KEY` (required for agent calls)
+- `OPENAI_MODEL` (default: `gpt-4.1-mini`)
+- `AGENT_FAKE_MODE` (`true`/`false`, default `false`; deterministic fast responses for tests)
+- `ESP_MCP_SERVERS_JSON` (JSON array/object for startup server registration)
+- `CORS_ALLOW_ORIGINS` (`*`, comma-separated list, or JSON array)
+- `CORS_ALLOW_CREDENTIALS` (`true`/`false`, default `false`)
 
 ## UI setup
 
@@ -59,17 +72,42 @@ npm run dev
 
 2. Open `http://localhost:3000`.
 
+UI notes:
+
+- Chat tab now uses `CopilotKit` + `CopilotChat` against backend `POST /copilotkit`.
+- CopilotKit dev console is enabled in the provider for runtime feedback while debugging.
+- MCP server management remains in the separate `MCP Configuration` tab.
+
 ## Streaming behavior
 
 - CopilotKit can request streamed responses by sending `stream: true` to `POST /copilotkit`.
 - The backend returns `text/event-stream` in OpenAI chunk format plus `[DONE]`.
-- You can also call `POST /agent/stream` directly for raw SSE token events.
+- You can also call `POST /agent/stream` directly for raw SSE events.
+- `POST /agent/stream` now emits tool lifecycle events (`tool_start`, `tool_end`) in addition to `token` and `done`.
 
 ## Adding MCP servers from UI
 
 - Open the UI and use the "MCP Servers" form.
 - Add `name`, `base URL`, timeout, and optional token.
 - The list updates immediately and those servers become available to the agent tools.
+
+## Local network discovery from chat
+
+The agent now has a separate local network discovery toolkit with tools for:
+
+- Inspecting local network info and inferred subnet.
+- Scanning local subnet ranges for MCP JSON-RPC (`/mcp`) and ESP32 REST (`/api`) servers.
+- Optionally saving discovered servers into current runtime config.
+
+Example prompts in chat:
+
+- `scan my local network for MCP servers`
+- `scan subnet 192.168.1.0/24 for MCP servers on ports 80,8090`
+- `scan and save discovered MCP servers`
+
+Notes:
+
+- Saved discovered servers are stored in current backend runtime (in-memory) and will reset on restart.
 
 ## Run with Docker Compose
 
@@ -148,3 +186,16 @@ For `esp32_rest`, toolkit exposes virtual tools that call HTTP endpoints like:
 - Tool failures are returned as structured `{ "ok": false, "error": "..." }` results instead of crashing the agent runtime.
 - The chat backend remains responsive even if one or more configured servers are unreachable.
 - You can still chat normally without registered servers; tool calls will just report no server availability.
+
+## Tests
+
+- Backend tests: `backend/.venv/bin/pytest tests/backend`
+- E2E tests (Playwright): `cd ui && npm run test:e2e`
+- Combined: `make test-all`
+
+For fast, deterministic tests use fake mode:
+
+```bash
+export AGENT_FAKE_MODE=true
+docker compose up --build -d
+```
