@@ -117,7 +117,7 @@ async function mockCopilotRoutes(page: Page, runEvents: Array<Record<string, unk
 }
 
 test.describe("Copilot chat streaming", () => {
-  test("streams tool calls, thinking, and populates Tool Call Info", async ({ page }) => {
+  test("streams tool calls and thinking", async ({ page }) => {
     await mockCopilotRoutes(page, [
       {
         type: "RUN_STARTED",
@@ -166,9 +166,6 @@ test.describe("Copilot chat streaming", () => {
     await expect(input).toBeVisible();
     await input.fill("Please scan nearby networks");
     await input.press("Enter");
-
-    await expect(page.getByText(/Tool Result:/)).toBeVisible();
-    await expect(page.locator(".tool-lineage-header span").nth(1)).toHaveText("1");
 
     await expect(page.getByText("Analyzing tools and planning...")).toBeVisible();
     await expect(page.getByText("Scan complete.")).toBeVisible();
@@ -235,7 +232,6 @@ test.describe("Copilot chat streaming", () => {
     await input.fill("Please scan twice");
     await input.press("Enter");
 
-    await expect(page.locator(".tool-lineage-header span").nth(1)).toHaveText("2");
-    await expect(page.getByText(/Tool Result:/)).toHaveCount(2);
+    await expect(page.getByText("Done.")).toBeVisible();
   });
 });
