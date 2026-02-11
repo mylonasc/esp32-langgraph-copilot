@@ -31,6 +31,12 @@ type BackendStatus = {
   warnings: string[];
 };
 
+type AgentMessageCount = {
+  thread_id: string;
+  raw_message_count: number | null;
+  sanitized_message_count: number | null;
+};
+
 function ChatSurface({
 }: {}) {
   return (
@@ -53,6 +59,8 @@ function ChatSurface({
 export default function HomePage() {
   const threadId = useMemo(() => crypto.randomUUID(), []);
   const [activeTab, setActiveTab] = useState<"chat" | "mcp">("chat");
+  const [agentMessageCount, setAgentMessageCount] = useState<AgentMessageCount | null>(null);
+  const [agentCountError, setAgentCountError] = useState<string | null>(null);
 
   const [servers, setServers] = useState<ServerConfig[]>([]);
   const [loadingServers, setLoadingServers] = useState(false);
@@ -155,10 +163,36 @@ export default function HomePage() {
     }
   }
 
+  async function refreshAgentMessageCount() {
+    try {
+      setAgentCountError(null);
+      const response = await fetch(
+        `${backendUrl}/agent/message-count?thread_id=${encodeURIComponent(threadId)}`,
+      );
+      if (!response.ok) {
+        setAgentCountError(`Count endpoint error: ${response.status}`);
+        return;
+      }
+      const data = await response.json();
+      setAgentMessageCount(data as AgentMessageCount);
+    } catch (err) {
+      setAgentCountError(`Cannot load count: ${String(err)}`);
+    }
+  }
+
   useEffect(() => {
     void refreshServers();
     void refreshStatus();
+    void refreshAgentMessageCount();
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== "chat") return;
+    const interval = window.setInterval(() => {
+      void refreshAgentMessageCount();
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [activeTab, threadId]);
 
   useEffect(() => {
     if (!baseUrl.trim()) {
@@ -295,6 +329,17 @@ export default function HomePage() {
 
       {activeTab === "chat" ? (
         <section className="chat chat-box copilot-wrap">
+          <div className="context-metrics">
+            <strong>Agent context messages:</strong>{" "}
+            {agentMessageCount?.raw_message_count ?? "-"}
+            <span className="context-meta">
+              (effective: {agentMessageCount?.sanitized_message_count ?? "-"})
+            </span>
+            <button type="button" className="context-refresh" onClick={() => void refreshAgentMessageCount()}>
+              Refresh
+            </button>
+            {agentCountError ? <span className="context-error">{agentCountError}</span> : null}
+          </div>
           <CopilotKit
             runtimeUrl={`${backendUrl}/copilotkit`}
             agent="default"

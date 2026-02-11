@@ -53,6 +53,8 @@ MANIFEST
 htmlcov/
 .nyc_output
 coverage/
+playwright-report/
+test-results/
 
 # --- IDEs & System ---
 .vscode/

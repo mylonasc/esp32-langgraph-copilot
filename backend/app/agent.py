@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
+    BaseMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
 
 from .esp_mcp_toolkit import ESPMCPToolkit
 from .network_discovery_toolkit import LocalNetworkDiscoveryToolkit
+from .react_agent_factory import (
+    InputSanitizerConfig,
+    OutputSanitizerConfig,
+    ReactAgentFactoryConfig,
+    create_stateful_react_agent,
+)
 from .settings import AppSettings
 
 
@@ -37,13 +44,29 @@ class ESPAgentService:
         llm = ChatOpenAI(
             model=self.settings.openai_model,
             temperature=0,
-            api_key=self.settings.openai_api_key,
+            api_key=cast(Any, self.settings.openai_api_key),
         )
         tools = [
             *self.toolkit.as_langchain_tools(),
             *self.discovery_toolkit.as_langchain_tools(),
         ]
-        return create_react_agent(model=llm, tools=tools)
+        return create_stateful_react_agent(
+            model=llm,
+            tools=tools,
+            config=ReactAgentFactoryConfig(
+                input_sanitizer=InputSanitizerConfig(
+                    enabled=True,
+                    strategy="truncate",
+                    max_messages=24,
+                    preserve_system_messages=True,
+                ),
+                output_sanitizer=OutputSanitizerConfig(
+                    enabled=False,
+                    remove_tool_inputs=False,
+                    remove_tool_outputs=False,
+                ),
+            ),
+        )
 
     def _ensure_api_key(self) -> None:
         if not self.settings.openai_api_key:
@@ -62,6 +85,107 @@ class ESPAgentService:
                     chunks.append(item["text"])
             return "".join(chunks)
         return ""
+
+    @staticmethod
+    def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
+        if not isinstance(tool_calls, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        for item in tool_calls:
+            if not isinstance(item, dict):
+                continue
+
+            if isinstance(item.get("function"), dict):
+                function_data = item["function"]
+                raw_name = function_data.get("name")
+                raw_arguments = function_data.get("arguments")
+                if not isinstance(raw_name, str) or not raw_name:
+                    continue
+                if isinstance(raw_arguments, str):
+                    try:
+                        args = json.loads(raw_arguments)
+                    except json.JSONDecodeError:
+                        args = {"raw": raw_arguments}
+                elif isinstance(raw_arguments, dict):
+                    args = raw_arguments
+                else:
+                    args = {}
+                normalized.append(
+                    {
+                        "name": raw_name,
+                        "args": args,
+                        "id": item.get("id"),
+                        "type": "tool_call",
+                    }
+                )
+                continue
+
+            name = item.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            args = item.get("args") if isinstance(item.get("args"), dict) else {}
+            normalized.append(
+                {
+                    "name": name,
+                    "args": args,
+                    "id": item.get("id"),
+                    "type": "tool_call",
+                }
+            )
+
+        return normalized
+
+    @classmethod
+    def _message_from_payload(cls, payload: Any) -> BaseMessage | None:
+        if not isinstance(payload, dict):
+            return None
+
+        role = str(payload.get("role", "")).lower()
+        content = payload.get("content", "")
+
+        if role == "system":
+            return SystemMessage(content=content if content is not None else "")
+
+        if role == "user":
+            return HumanMessage(content=content if content is not None else "")
+
+        if role == "assistant":
+            tool_calls = cls._normalize_tool_calls(payload.get("tool_calls"))
+            if tool_calls:
+                return AIMessage(
+                    content=content if content is not None else "",
+                    tool_calls=tool_calls,
+                )
+            return AIMessage(content=content if content is not None else "")
+
+        if role == "tool":
+            tool_call_id = (
+                payload.get("tool_call_id") or payload.get("toolCallId") or ""
+            )
+            return ToolMessage(
+                content=content if content is not None else "",
+                tool_call_id=str(tool_call_id),
+            )
+
+        return None
+
+    def _build_input_messages(
+        self,
+        message: str | None,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[BaseMessage]:
+        parsed_messages: list[BaseMessage] = []
+        if isinstance(messages, list):
+            for item in messages:
+                parsed = self._message_from_payload(item)
+                if parsed is not None:
+                    parsed_messages.append(parsed)
+
+        if not parsed_messages and message:
+            parsed_messages = [HumanMessage(content=message)]
+
+        return [SystemMessage(content=SYSTEM_PROMPT), *parsed_messages]
 
     @staticmethod
     def _extract_thinking_text(chunk: AIMessageChunk) -> str:
@@ -106,21 +230,22 @@ class ESPAgentService:
 
         return "".join(thinking_chunks)
 
-    async def invoke(self, message: str, thread_id: str = "default") -> dict[str, Any]:
+    async def invoke(
+        self,
+        message: str | None,
+        thread_id: str = "default",
+        messages: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         self._ensure_api_key()
+        input_messages = self._build_input_messages(message=message, messages=messages)
 
         result = await self._graph.ainvoke(
-            {
-                "messages": [
-                    SystemMessage(content=SYSTEM_PROMPT),
-                    HumanMessage(content=message),
-                ]
-            },
+            cast(Any, {"messages": input_messages, "thread_id": thread_id}),
             config={"configurable": {"thread_id": thread_id}},
         )
-        messages = result.get("messages", [])
+        result_messages = result.get("messages", []) if isinstance(result, dict) else []
         response_text = ""
-        for item in reversed(messages):
+        for item in reversed(result_messages):
             if isinstance(item, AIMessage):
                 response_text = item.text()
                 break
@@ -128,14 +253,22 @@ class ESPAgentService:
         return {
             "response": response_text,
             "messages": [
-                m.model_dump() if hasattr(m, "model_dump") else str(m) for m in messages
+                m.model_dump() if hasattr(m, "model_dump") else str(m)
+                for m in result_messages
             ],
         }
 
     async def stream(
-        self, message: str, thread_id: str = "default"
+        self,
+        message: str | None,
+        thread_id: str = "default",
+        messages: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[str]:
-        async for event in self.stream_events(message=message, thread_id=thread_id):
+        async for event in self.stream_events(
+            message=message,
+            thread_id=thread_id,
+            messages=messages,
+        ):
             if event.get("type") == "token" and isinstance(event.get("content"), str):
                 yield event["content"]
 
@@ -154,17 +287,16 @@ class ESPAgentService:
         return f"{raw[:max_len]}..."
 
     async def stream_events(
-        self, message: str, thread_id: str = "default"
+        self,
+        message: str | None,
+        thread_id: str = "default",
+        messages: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         self._ensure_api_key()
+        input_messages = self._build_input_messages(message=message, messages=messages)
         thinking_open = False
         async for event in self._graph.astream_events(
-            {
-                "messages": [
-                    SystemMessage(content=SYSTEM_PROMPT),
-                    HumanMessage(content=message),
-                ]
-            },
+            cast(Any, {"messages": input_messages, "thread_id": thread_id}),
             config={"configurable": {"thread_id": thread_id}},
             version="v2",
         ):

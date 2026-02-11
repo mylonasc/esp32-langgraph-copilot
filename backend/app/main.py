@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from .agent import ESPAgentService
 from .esp_mcp_toolkit import ESPMCPToolkit, MCPServerConfig
 from .network_discovery_toolkit import LocalNetworkDiscoveryToolkit
+from .react_agent_factory import get_thread_message_counts
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -150,9 +151,14 @@ def _fake_response_text(message: str) -> str:
 
 
 async def _stream_agent_events(
-    message: str, thread_id: str
+    message: str,
+    thread_id: str,
+    messages: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     if settings.agent_fake_mode:
+        fallback_message = message
+        if not fallback_message and isinstance(messages, list):
+            fallback_message = _extract_latest_user_message(messages) or ""
         yield {
             "type": "thinking_start",
             "title": "Planning",
@@ -167,7 +173,7 @@ async def _stream_agent_events(
         yield {
             "type": "tool_start",
             "tool_name": "esp_fake_tool",
-            "input": json.dumps({"query": message}),
+            "input": json.dumps({"query": fallback_message}),
             "tool_call_key": "fake_tool_call_1",
         }
         yield {
@@ -176,11 +182,15 @@ async def _stream_agent_events(
             "output": json.dumps({"ok": True, "thread_id": thread_id}),
             "tool_call_key": "fake_tool_call_1",
         }
-        for token in _fake_response_text(message).split(" "):
+        for token in _fake_response_text(fallback_message).split(" "):
             yield {"type": "token", "content": f"{token} "}
         return
 
-    async for event in service.stream_events(message, thread_id):
+    async for event in service.stream_events(
+        message=message,
+        thread_id=thread_id,
+        messages=messages,
+    ):
         yield event
 
 
@@ -213,6 +223,7 @@ async def _agui_run_stream(
     thread_id: str,
     run_id: str,
     input_payload: dict[str, Any],
+    messages: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     message_id = f"msg_{uuid4().hex}"
     tool_counter = 0
@@ -312,7 +323,11 @@ async def _agui_run_stream(
         async for synthetic_event in _emit_synthetic_thinking_start():
             yield synthetic_event
 
-        async for event in _stream_agent_events(latest_message, thread_id):
+        async for event in _stream_agent_events(
+            latest_message,
+            thread_id,
+            messages=messages,
+        ):
             kind = event.get("type")
             if kind in {"thinking_start", "thinking", "thinking_end"}:
                 real_thinking_seen = True
@@ -666,7 +681,9 @@ async def agent_invoke(payload: AgentInvokeRequest) -> dict[str, Any]:
                 "thread_id": payload.thread_id,
                 "messages": [],
             }
-        return await service.invoke(payload.message, payload.thread_id)
+        return await service.invoke(
+            message=payload.message, thread_id=payload.thread_id
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -675,13 +692,26 @@ async def agent_invoke(payload: AgentInvokeRequest) -> dict[str, Any]:
 async def agent_stream(payload: AgentInvokeRequest) -> StreamingResponse:
     async def event_generator() -> AsyncIterator[str]:
         try:
-            async for event in _stream_agent_events(payload.message, payload.thread_id):
+            async for event in _stream_agent_events(
+                payload.message,
+                payload.thread_id,
+            ):
                 yield _sse(json.dumps(event))
             yield _sse(json.dumps({"type": "done"}))
         except Exception as exc:
             yield _sse(json.dumps({"type": "error", "error": str(exc)}))
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/agent/message-count")
+async def agent_message_count(thread_id: str) -> dict[str, Any]:
+    counts = get_thread_message_counts(thread_id)
+    return {
+        "thread_id": thread_id,
+        "raw_message_count": counts.get("raw_message_count"),
+        "sanitized_message_count": counts.get("sanitized_message_count"),
+    }
 
 
 @app.post("/copilotkit")
@@ -742,6 +772,7 @@ async def copilotkit_invoke(payload: dict[str, Any]) -> Any:
                     thread_id=thread_id,
                     run_id=run_id,
                     input_payload=body,
+                    messages=parsed_messages,
                 ),
                 media_type="text/event-stream",
             )
@@ -824,7 +855,9 @@ async def copilotkit_invoke(payload: dict[str, Any]) -> Any:
                 )
 
                 async for event in _stream_agent_events(
-                    latest_message, thread_id=thread_id
+                    latest_message,
+                    thread_id=thread_id,
+                    messages=parsed.messages,
                 ):
                     if event.get("type") != "token":
                         continue
@@ -881,7 +914,11 @@ async def copilotkit_invoke(payload: dict[str, Any]) -> Any:
     if settings.agent_fake_mode:
         response_text = _fake_response_text(latest_message)
     else:
-        result = await service.invoke(latest_message, thread_id=thread_id)
+        result = await service.invoke(
+            message=latest_message,
+            thread_id=thread_id,
+            messages=parsed.messages,
+        )
         response_text = str(result["response"])
 
     return {
